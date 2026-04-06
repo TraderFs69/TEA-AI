@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor
 from polygon import RESTClient
 from openai import OpenAI
+import tempfile
 
 # ==============================
 # CONFIG
@@ -92,7 +93,7 @@ def compute_indicators(df):
 
 
 # ==============================
-# ANALYZE
+# ANALYZE STOCK
 # ==============================
 def analyze_ticker(ticker):
 
@@ -109,19 +110,15 @@ def analyze_ticker(ticker):
 
     score = 0
 
-    # Trend
     if latest["close"] > latest["EMA20"]:
         score += 1
 
-    # Momentum
     if 55 < latest["RSI"] < 70:
         score += 1
 
-    # Volume
     if latest["RVOL"] > 1.2:
         score += 1
 
-    # Breakout
     high20 = df["high"].rolling(20).max().iloc[-1]
     if latest["close"] >= high20:
         score += 2
@@ -129,7 +126,6 @@ def analyze_ticker(ticker):
     if score < 3:
         return None
 
-    # 🔥 ENTRY / STOP / TP
     entry = latest["close"]
     stop = df["low"].rolling(10).min().iloc[-1]
     target = entry + (entry - stop) * 2
@@ -146,7 +142,7 @@ def analyze_ticker(ticker):
 
 
 # ==============================
-# SCAN (FAST)
+# SCAN MARKET (FAST)
 # ==============================
 def scan_market():
 
@@ -189,6 +185,51 @@ def get_macro():
 
 
 # ==============================
+# SECTORS
+# ==============================
+sector_map = {
+    "Tech": "XLK",
+    "Energy": "XLE",
+    "Finance": "XLF",
+    "Healthcare": "XLV",
+    "Consumer": "XLY",
+    "Industrial": "XLI"
+}
+
+def analyze_sectors():
+
+    rows = []
+
+    for name, ticker in sector_map.items():
+        df = get_data(ticker)
+        if df is None:
+            continue
+
+        df = compute_indicators(df)
+        latest = df.iloc[-1]
+
+        score = 0
+
+        if latest["close"] > latest["EMA20"]:
+            score += 1
+        if latest["RSI"] > 55:
+            score += 1
+        if latest["RVOL"] > 1.2:
+            score += 1
+
+        rows.append({
+            "sector": name,
+            "etf": ticker,
+            "score": score,
+            "rsi": round(latest["RSI"], 1)
+        })
+
+    df = pd.DataFrame(rows)
+
+    return df.sort_values(by="score", ascending=False)
+
+
+# ==============================
 # CHART
 # ==============================
 def plot_chart(df, ticker):
@@ -212,17 +253,46 @@ def plot_chart(df, ticker):
 
 
 # ==============================
-# DISCORD
+# SAVE IMAGE FOR DISCORD
 # ==============================
-def send_discord(msg):
+def save_chart_image(df, ticker):
+
+    fig = go.Figure(data=[go.Candlestick(
+        x=df.index,
+        open=df["open"],
+        high=df["high"],
+        low=df["low"],
+        close=df["close"]
+    )])
+
+    fig.update_layout(template="plotly_dark", title=ticker)
+
+    file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+    fig.write_image(file.name)
+
+    return file.name
+
+
+# ==============================
+# DISCORD WITH IMAGES
+# ==============================
+def send_discord(report, top5):
 
     if not WEBHOOK_URL:
         return
 
-    parts = [msg[i:i+1900] for i in range(0, len(msg), 1900)]
+    requests.post(WEBHOOK_URL, json={"content": report})
 
-    for p in parts:
-        requests.post(WEBHOOK_URL, json={"content": p})
+    for _, row in top5.iterrows():
+
+        df_chart = get_data(row["ticker"])
+        if df_chart is None:
+            continue
+
+        img = save_chart_image(df_chart.tail(100), row["ticker"])
+
+        with open(img, "rb") as f:
+            requests.post(WEBHOOK_URL, files={"file": f})
 
 
 # ==============================
@@ -232,7 +302,11 @@ st.subheader("🌍 Macro")
 macro = get_macro()
 st.write(macro)
 
-st.subheader("🎯 Scan S&P500")
+st.subheader("🏭 Secteurs")
+sector_df = analyze_sectors()
+st.dataframe(sector_df)
+
+st.subheader("🎯 Top 5 S&P500")
 top5 = scan_market()
 
 if top5.empty:
@@ -246,9 +320,14 @@ else:
         if df_chart is not None:
             plot_chart(df_chart.tail(100), row["ticker"])
 
-    # REPORT
     report = "🟫 TEA FINAL REPORT\n\n"
-    report += "Macro:\n" + macro + "\n\n"
+    report += "🌍 Macro:\n" + macro + "\n\n"
+
+    report += "🏭 Secteurs dominants:\n"
+    for _, row in sector_df.head(3).iterrows():
+        report += f"{row['sector']} ({row['etf']}) Score {row['score']}\n"
+
+    report += "\n🎯 Top Picks:\n"
 
     for _, row in top5.iterrows():
         report += f"""{row['ticker']}
@@ -259,4 +338,4 @@ Target: {row['target']}
 
 """
 
-    send_discord(report)
+    send_discord(report, top5)
