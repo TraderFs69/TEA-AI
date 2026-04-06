@@ -2,21 +2,22 @@ import pandas as pd
 import numpy as np
 import requests
 import datetime
-from polygon import RESTClient
+import os
 import streamlit as st
+from polygon import RESTClient
 
 # ==============================
 # CONFIG
 # ==============================
-
-
-API_KEY = st.secrets["POLYGON_API_KEY"]
-WEBHOOK_URL = st.secrets["DISCORD_WEBHOOK_URL"]
+API_KEY = os.environ.get("POLYGON_API_KEY")
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 client = RESTClient(API_KEY)
 
 TICKERS_URL = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
 
+st.set_page_config(layout="wide")
+st.title("🟫 TEA AI Dashboard")
 
 # ==============================
 # LOAD TICKERS
@@ -77,7 +78,7 @@ def compute_indicators(df):
 
 
 # ==============================
-# STRUCTURE TRADING
+# STRUCTURE
 # ==============================
 def compute_rr(df):
     price = df["close"].iloc[-1]
@@ -87,25 +88,20 @@ def compute_rr(df):
     risk = price - support
     reward = resistance - price
 
-    if risk == 0:
+    if risk <= 0:
         return 0
 
     return reward / risk
 
 
-def compute_distance_resistance(df):
+def compute_distance(df):
     resistance = df["high"].rolling(20).max().iloc[-1]
     price = df["close"].iloc[-1]
     return (resistance - price) / price
 
 
-def compute_atr(df):
-    df["tr"] = df["high"] - df["low"]
-    return df["tr"].rolling(14).mean().iloc[-1]
-
-
 # ==============================
-# SCORE TEA
+# SCORE
 # ==============================
 def compute_score(row):
     score = 0
@@ -118,9 +114,7 @@ def compute_score(row):
     if row["MACD"] > row["MACD_signal"]:
         score += 2
 
-    if row["RSI"] > 55:
-        score += 1
-    if row["RSI"] < 35:
+    if row["RSI"] > 55 or row["RSI"] < 35:
         score += 1
 
     if row["close"] > row["EMA200"]:
@@ -129,11 +123,11 @@ def compute_score(row):
     if row["volume"] > row["Volume_MA"]:
         score += 1
 
-    return round(score, 2)
+    return score
 
 
 # ==============================
-# PROBABILITÉ (AI STYLE)
+# PROBABILITÉ
 # ==============================
 def compute_probability(row, rr):
     prob = 0.55
@@ -153,15 +147,7 @@ def compute_probability(row, rr):
     if rr > 1.5:
         prob += 0.03
 
-    return round(prob, 4)
-
-
-def compute_ai_score(prob):
-    return round(prob * 10, 1)
-
-
-def compute_edge(prob):
-    return round((prob - 0.55) * 100, 2)
+    return prob
 
 
 # ==============================
@@ -169,18 +155,20 @@ def compute_edge(prob):
 # ==============================
 def analyze_ticker(ticker):
     df = get_data(ticker)
+
     if df is None or len(df) < 50:
         return None
 
     df = compute_indicators(df)
 
     rr = compute_rr(df)
-    distance = compute_distance_resistance(df)
+    distance = compute_distance(df)
 
-    # FILTRE QUALITÉ
-    if rr < 1.3:
+    # 🔥 FILTRE ADAPTATIF (corrigé)
+    if rr < 1.0:  # AVANT 1.3 → trop strict
         return None
-    if distance > 0.08:
+
+    if distance > 0.15:  # AVANT 0.08 → trop strict
         return None
 
     latest = df.iloc[-1]
@@ -191,11 +179,9 @@ def analyze_ticker(ticker):
         "ticker": ticker,
         "score": compute_score(latest),
         "prob": prob,
-        "ai_score": compute_ai_score(prob),
-        "edge": compute_edge(prob),
-        "rr": round(rr, 2),
-        "rsi": latest["RSI"],
-        "momentum": latest["MACD"] > latest["MACD_signal"]
+        "ai_score": round(prob * 10, 1),
+        "edge": round((prob - 0.55) * 100, 2),
+        "rr": round(rr, 2)
     }
 
 
@@ -204,51 +190,46 @@ def analyze_ticker(ticker):
 # ==============================
 results = []
 
-for t in tickers:
+for t in tickers[:200]:  # 🔥 limiter pour test rapide
     data = analyze_ticker(t)
     if data:
         results.append(data)
 
 df = pd.DataFrame(results)
 
-df = df[df["ai_score"] >= 7]
+# fallback si vide
+if df.empty:
+    st.error("❌ Aucun stock trouvé — filtre trop strict")
+else:
+    top5 = df.sort_values(by="ai_score", ascending=False).head(5)
 
-top5 = df.sort_values(by="ai_score", ascending=False).head(5)
+    st.subheader("Top 5")
+    st.dataframe(top5)
 
+    # ==============================
+    # TEXTE
+    # ==============================
+    def generate_text(df):
+        text = "🟫 TEA — RECAP SWING (AI)\n\n"
 
-# ==============================
-# TEXTE FINAL TEA
-# ==============================
-def generate_text(df):
-    text = "🟫 TEA — RECAP SWING (AI)\n\n"
+        for _, row in df.iterrows():
+            text += f"{row['ticker']} — Score {row['ai_score']}\n"
+            text += f"Probabilité : {round(row['prob']*100)}%\n"
+            text += f"Edge : +{row['edge']}%\n"
+            text += f"RR : {row['rr']}\n\n"
 
-    for _, row in df.iterrows():
-        text += f"{row['ticker']} — Score {row['ai_score']}\n"
-        text += f"Probabilité : {round(row['prob']*100)}%\n"
-        text += f"Edge : +{row['edge']}%\n"
-        text += f"RR : {row['rr']}\n"
+        text += "🚨 5 opportunités retenues\n"
+        text += "💡 Moins de trades = plus d’argent."
 
-        if row["momentum"]:
-            text += "Setup : Momentum\n"
-        elif row["rsi"] < 40:
-            text += "Setup : Reversal\n"
-        else:
-            text += "Setup : Continuation\n"
+        return text
 
-        text += "\n"
+    msg = generate_text(top5)
 
-    text += "🚨 5 opportunités retenues sur +500 analysées\n"
-    text += "💡 Moins de trades = plus d’argent."
+    st.subheader("Message Discord")
+    st.code(msg)
 
-    return text
-
-
-msg = generate_text(top5)
-
-
-# ==============================
-# DISCORD
-# ==============================
-requests.post(WEBHOOK_URL, json={"content": msg})
-
-print("✅ TEA AI SYSTEM DONE")
+    # ==============================
+    # DISCORD (sécurisé)
+    # ==============================
+    if WEBHOOK_URL:
+        requests.post(WEBHOOK_URL, json={"content": msg})
