@@ -2,4 +2,5 @@ pandas
 numpy
 requests
 polygon-api-client
+openai
 streamlit
