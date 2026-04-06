@@ -4,3 +4,4 @@ requests
 polygon-api-client
 openai
 streamlit
+plotly
