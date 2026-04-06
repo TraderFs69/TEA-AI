@@ -4,8 +4,10 @@ import requests
 import datetime
 import os
 import streamlit as st
+import streamlit.components.v1 as components
 from polygon import RESTClient
 from openai import OpenAI
+import json
 
 # ==============================
 # CONFIG
@@ -17,17 +19,8 @@ OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 client = RESTClient(API_KEY)
 gpt = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
-TICKERS_URL = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
-
 st.set_page_config(layout="wide")
 st.title("🟫 TEA — HEDGE FUND DASHBOARD")
-
-# ==============================
-# DEBUG
-# ==============================
-st.write("Polygon:", "OK" if API_KEY else "❌")
-st.write("OpenAI:", "OK" if OPENAI_KEY else "❌")
-st.write("Discord:", "OK" if WEBHOOK_URL else "❌")
 
 # ==============================
 # DATA
@@ -50,34 +43,85 @@ def get_data(ticker):
             return None
 
         df = pd.DataFrame([{
+            "time": pd.to_datetime(a.timestamp, unit="ms"),
+            "open": a.open,
             "high": a.high,
             "low": a.low,
             "close": a.close,
             "volume": a.volume
         } for a in aggs])
 
+        df.set_index("time", inplace=True)
         return df
+
     except:
         return None
 
 
 # ==============================
-# INDICATORS
+# INDICATORS (FIXED)
 # ==============================
 def compute_indicators(df):
-    df["EMA9"] = df["close"].ewm(span=9).mean()
-    df["EMA20"] = df["close"].ewm(span=20).mean()
-    df["EMA50"] = df["close"].ewm(span=50).mean()
-    df["EMA200"] = df["close"].ewm(span=200).mean()
 
-    df["RSI"] = 100 - (100 / (1 + df["close"].pct_change().rolling(14).mean()))
+    df["EMA9"] = df["close"].ewm(span=9, adjust=False).mean()
+    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["EMA200"] = df["close"].ewm(span=200, adjust=False).mean()
 
-    df["MACD"] = df["close"].ewm(span=12).mean() - df["close"].ewm(span=26).mean()
-    df["MACD_signal"] = df["MACD"].ewm(span=9).mean()
+    # RSI WILDER
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
+
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    # MACD
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+
+    df["MACD"] = ema12 - ema26
+    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
+
+    # RVOL
     df["Volume_MA"] = df["volume"].rolling(20).mean()
+    df["RVOL"] = df["volume"] / df["Volume_MA"]
 
     return df
+
+
+# ==============================
+# CHART (LIGHTWEIGHT)
+# ==============================
+def plot_candles(df):
+    data = [
+        {
+            "time": int(i.timestamp()),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+        }
+        for i, row in df.iterrows()
+    ]
+
+    html = f"""
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <div id="chart"></div>
+    <script>
+    const chart = LightweightCharts.createChart(document.getElementById('chart'), {{
+        width: 800,
+        height: 400
+    }});
+    const series = chart.addCandlestickSeries();
+    series.setData({json.dumps(data)});
+    </script>
+    """
+    components.html(html, height=420)
 
 
 # ==============================
@@ -91,233 +135,134 @@ def compute_rr(df):
     risk = price - support
     reward = resistance - price
 
-    if risk <= 0:
-        return 0
-
-    return reward / risk
-
-
-def compute_distance(df):
-    resistance = df["high"].rolling(20).max().iloc[-1]
-    price = df["close"].iloc[-1]
-    return (resistance - price) / price
+    return reward / risk if risk > 0 else 0
 
 
 # ==============================
-# PROBABILITY
-# ==============================
-def compute_probability(row, rr):
-    prob = 0.55
-
-    if row["MACD"] > row["MACD_signal"]:
-        prob += 0.04
-
-    if row["EMA9"] > row["EMA20"]:
-        prob += 0.03
-
-    if row["RSI"] > 60 or row["RSI"] < 35:
-        prob += 0.02
-
-    if row["volume"] > row["Volume_MA"]:
-        prob += 0.03
-
-    if rr > 1.5:
-        prob += 0.03
-
-    return prob
-
-
-# ==============================
-# GPT STOCK
+# GPT
 # ==============================
 def generate_gpt_analysis(row):
     if gpt is None:
-        return "⚠️ GPT non configuré"
-
-    try:
-        response = gpt.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Tu es un trader professionnel."},
-                {"role": "user", "content": f"""
-Analyse ce stock en 3 lignes max.
-
-Ticker: {row['ticker']}
-Score: {row['ai_score']}
-Probabilité: {round(row['prob']*100)}%
-RR: {row['rr']}
-"""}
-            ],
-            temperature=0.4
-        )
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        return f"❌ GPT ERROR: {str(e)}"
-
-
-# ==============================
-# GPT MACRO
-# ==============================
-def generate_macro(spy, breadth):
-    if gpt is None:
-        return "Macro indisponible"
+        return "GPT non configuré"
 
     try:
         response = gpt.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{
                 "role": "user",
-                "content": f"""
-Analyse le marché global en 3 lignes.
-
-SPY RSI: {spy['rsi']}
-Breadth: {breadth}%
-"""
+                "content": f"Analyse ce stock en 3 lignes: {row['ticker']}, score {row['ai_score']}, prob {round(row['prob']*100)}%"
             }],
             temperature=0.4
         )
-        return response.choices[0].message.content.strip()
-
+        return response.choices[0].message.content
     except Exception as e:
-        return f"❌ Macro error: {e}"
+        return str(e)
 
 
 # ==============================
-# TEA OVERLAY
+# SECTORS
 # ==============================
-def generate_tea_overlay(row):
-    return f"""Structure {'forte' if row['rr'] > 1.5 else 'correcte'}.
-Momentum {'aligné' if row['prob'] > 0.60 else 'à confirmer'}.
-Approche: {'continuation' if row['edge'] > 5 else 'prudente'}."""
+sector_etfs = {
+    "Tech": "XLK",
+    "Energy": "XLE",
+    "Finance": "XLF",
+    "Health": "XLV",
+    "Consumer": "XLY",
+    "Industrial": "XLI"
+}
 
+def analyze_sectors():
+    results = []
 
-# ==============================
-# SPY
-# ==============================
-def get_spy_data():
-    df = get_data("SPY")
-    df = compute_indicators(df)
-    latest = df.iloc[-1]
-
-    return {
-        "price": round(latest["close"], 2),
-        "rsi": round(latest["RSI"], 1),
-        "trend": latest["EMA9"] > latest["EMA20"]
-    }
-
-
-# ==============================
-# BREADTH
-# ==============================
-def compute_breadth(tickers):
-    count = 0
-    total = 0
-
-    for t in tickers[:100]:
-        df = get_data(t)
-        if df is None or len(df) < 50:
+    for name, ticker in sector_etfs.items():
+        df = get_data(ticker)
+        if df is None:
             continue
 
         df = compute_indicators(df)
         latest = df.iloc[-1]
 
-        total += 1
-        if latest["close"] > latest["EMA50"]:
-            count += 1
+        score = 0
+        if latest["EMA9"] > latest["EMA20"]:
+            score += 1
+        if latest["MACD"] > latest["MACD_signal"]:
+            score += 1
+        if latest["RSI"] > 55:
+            score += 1
 
-    return round((count / total) * 100, 1) if total > 0 else 0
+        results.append({"sector": name, "ticker": ticker, "score": score})
+
+    return pd.DataFrame(results).sort_values(by="score", ascending=False)
 
 
 # ==============================
-# DISCORD SAFE
+# DISCORD FIX
 # ==============================
 def send_discord(message):
     if not WEBHOOK_URL:
         return
 
     parts = [message[i:i+1900] for i in range(0, len(message), 1900)]
-
-    for part in parts:
-        r = requests.post(WEBHOOK_URL, json={"content": part})
-        print("Discord status:", r.status_code)
-
-
-# ==============================
-# ANALYSE
-# ==============================
-def analyze_ticker(ticker):
-    df = get_data(ticker)
-
-    if df is None or len(df) < 50:
-        return None
-
-    df = compute_indicators(df)
-
-    rr = compute_rr(df)
-    distance = compute_distance(df)
-
-    if rr < 1.0:
-        return None
-
-    if distance > 0.15:
-        return None
-
-    latest = df.iloc[-1]
-    prob = compute_probability(latest, rr)
-
-    return {
-        "ticker": ticker,
-        "ai_score": round(prob * 10, 1),
-        "prob": prob,
-        "edge": round((prob - 0.55) * 100, 2),
-        "rr": round(rr, 2)
-    }
+    for p in parts:
+        requests.post(WEBHOOK_URL, json={"content": p})
 
 
 # ==============================
 # MAIN
 # ==============================
-tickers = pd.read_csv(TICKERS_URL)["Symbol"].tolist()
+tickers = ["AAPL","MSFT","NVDA","TSLA","META","AMD","AMZN"]
 
 results = []
-for t in tickers[:200]:
-    r = analyze_ticker(t)
-    if r:
-        results.append(r)
+
+for t in tickers:
+    df = get_data(t)
+    if df is None:
+        continue
+
+    df = compute_indicators(df)
+    rr = compute_rr(df)
+    latest = df.iloc[-1]
+
+    prob = 0.55 + (0.05 if latest["MACD"] > latest["MACD_signal"] else 0)
+
+    results.append({
+        "ticker": t,
+        "ai_score": round(prob * 10, 1),
+        "prob": prob,
+        "rr": round(rr, 2)
+    })
 
 df = pd.DataFrame(results)
 
-if df.empty:
-    st.error("❌ Aucun stock trouvé")
-else:
+if not df.empty:
+
     top5 = df.sort_values(by="ai_score", ascending=False).head(5)
-
-    spy = get_spy_data()
-    breadth = compute_breadth(tickers)
-
-    macro = generate_macro(spy, breadth)
-
-    text = "🟫 TEA — HEDGE FUND REPORT\n\n"
-
-    text += "🌍 Macro\n" + macro + "\n\n"
-    text += f"📊 SPY: {spy['price']} | RSI {spy['rsi']}\n"
-    text += f"🔥 Breadth: {breadth}%\n\n"
-    text += "----------------------\n\n"
-
-    for _, row in top5.iterrows():
-        text += f"{row['ticker']} — Score {row['ai_score']}\n"
-        text += f"Probabilité: {round(row['prob']*100)}%\n"
-        text += f"RR: {row['rr']}\n\n"
-
-        text += generate_gpt_analysis(row) + "\n\n"
-        text += "🧠 Lecture TEA\n" + generate_tea_overlay(row) + "\n\n"
-
-        text += "----------------------\n\n"
 
     st.subheader("Top 5")
     st.dataframe(top5)
 
+    # SECTORS
+    st.subheader("Secteurs")
+    sector_df = analyze_sectors()
+    st.dataframe(sector_df)
+
+    # CHARTS
+    st.subheader("Charts")
+    for _, row in top5.iterrows():
+        st.write(row["ticker"])
+        df_chart = get_data(row["ticker"])
+        plot_candles(df_chart.tail(100))
+
+    # REPORT
+    text = "TEA REPORT\n\n"
+
+    for _, row in top5.iterrows():
+        text += f"{row['ticker']} Score {row['ai_score']}\n"
+        text += generate_gpt_analysis(row) + "\n\n"
+
+    st.code(text)
+
+    send_discord(text)
     st.subheader("Rapport")
     st.code(text)
 
