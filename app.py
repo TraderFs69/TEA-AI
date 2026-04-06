@@ -15,12 +15,26 @@ WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 
 client = RESTClient(API_KEY)
-gpt = OpenAI(api_key=OPENAI_KEY)
+
+# 🔥 GPT CLIENT (sécurisé)
+gpt = None
+if OPENAI_KEY:
+    try:
+        gpt = OpenAI(api_key=OPENAI_KEY)
+    except Exception as e:
+        st.error(f"❌ GPT init error: {e}")
 
 TICKERS_URL = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
 
 st.set_page_config(layout="wide")
 st.title("🟫 TEA — HEDGE FUND DASHBOARD")
+
+# ==============================
+# DEBUG CLÉS
+# ==============================
+st.write("Polygon:", "OK" if API_KEY else "❌")
+st.write("OpenAI:", "OK" if OPENAI_KEY else "❌")
+st.write("Discord:", "OK" if WEBHOOK_URL else "❌")
 
 # ==============================
 # DATA
@@ -50,7 +64,8 @@ def get_data(ticker):
         } for a in aggs])
 
         return df
-    except:
+
+    except Exception as e:
         return None
 
 
@@ -97,32 +112,6 @@ def compute_distance(df):
 
 
 # ==============================
-# SCORE
-# ==============================
-def compute_score(row):
-    score = 0
-
-    if row["EMA9"] > row["EMA20"] > row["EMA50"]:
-        score += 4
-    elif row["EMA9"] > row["EMA20"]:
-        score += 2
-
-    if row["MACD"] > row["MACD_signal"]:
-        score += 2
-
-    if row["RSI"] > 55 or row["RSI"] < 35:
-        score += 1
-
-    if row["close"] > row["EMA200"]:
-        score += 2
-
-    if row["volume"] > row["Volume_MA"]:
-        score += 1
-
-    return score
-
-
-# ==============================
 # PROBABILITÉ
 # ==============================
 def compute_probability(row, rr):
@@ -147,11 +136,19 @@ def compute_probability(row, rr):
 
 
 # ==============================
-# GPT ANALYSE STOCK
+# GPT ANALYSE
 # ==============================
 def generate_gpt_analysis(row):
-    prompt = f"""
-Analyse ce stock en 3 lignes.
+    if gpt is None:
+        return "⚠️ GPT non configuré"
+
+    try:
+        response = gpt.chat.completions.create(
+            model="gpt-4o-mini",  # 🔥 stable
+            messages=[
+                {"role": "system", "content": "Tu es un trader professionnel."},
+                {"role": "user", "content": f"""
+Analyse ce stock en 3 lignes max.
 
 Ticker : {row['ticker']}
 Score : {row['ai_score']}
@@ -159,82 +156,16 @@ Probabilité : {round(row['prob']*100)}%
 RR : {row['rr']}
 
 Structure, momentum, plan implicite.
-Ton professionnel.
-"""
-
-    try:
-        response = gpt.chat.completions.create(
-            model="gpt-5.3",
-            messages=[{"role": "user", "content": prompt}],
+Style clair, professionnel.
+"""}
+            ],
             temperature=0.4
         )
+
         return response.choices[0].message.content.strip()
-    except:
-        return "Analyse indisponible."
 
-
-# ==============================
-# SPY
-# ==============================
-def get_spy():
-    df = get_data("SPY")
-    df = compute_indicators(df)
-    latest = df.iloc[-1]
-
-    return {
-        "price": round(latest["close"], 2),
-        "rsi": round(latest["RSI"], 1),
-        "trend": latest["EMA9"] > latest["EMA20"]
-    }
-
-
-# ==============================
-# BREADTH
-# ==============================
-def compute_breadth(tickers):
-    count = 0
-    total = 0
-
-    for t in tickers[:150]:
-        df = get_data(t)
-        if df is None or len(df) < 50:
-            continue
-
-        df = compute_indicators(df)
-        latest = df.iloc[-1]
-
-        total += 1
-        if latest["close"] > latest["EMA50"]:
-            count += 1
-
-    if total == 0:
-        return 0
-
-    return round((count / total) * 100, 1)
-
-
-# ==============================
-# GPT MACRO
-# ==============================
-def generate_macro(spy, breadth):
-    prompt = f"""
-Analyse le marché global.
-
-SPY RSI : {spy['rsi']}
-Breadth : {breadth}%
-
-3 lignes max.
-"""
-
-    try:
-        response = gpt.chat.completions.create(
-            model="gpt-5.3",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4
-        )
-        return response.choices[0].message.content
-    except:
-        return "Macro indisponible."
+    except Exception as e:
+        return f"❌ GPT ERROR: {str(e)}"
 
 
 # ==============================
@@ -288,21 +219,13 @@ if df.empty:
 else:
     top5 = df.sort_values(by="ai_score", ascending=False).head(5)
 
-    spy = get_spy()
-    breadth = compute_breadth(tickers)
-
-    macro = generate_macro(spy, breadth)
+    st.subheader("Top 5")
+    st.dataframe(top5)
 
     # ==============================
-    # REPORT
+    # TEXTE
     # ==============================
-    text = "🟫 TEA — HEDGE FUND REPORT\n\n"
-
-    text += "🌍 Macro\n" + macro + "\n\n"
-    text += f"📊 SPY : {spy['price']} | RSI {spy['rsi']}\n"
-    text += f"🔥 Breadth : {breadth}%\n\n"
-
-    text += "----------------------\n\n"
+    text = "🟫 TEA — REPORT\n\n"
 
     for _, row in top5.iterrows():
         text += f"{row['ticker']} — Score {row['ai_score']}\n"
@@ -312,19 +235,11 @@ else:
         text += generate_gpt_analysis(row)
         text += "\n\n---\n\n"
 
-    text += "💡 Conclusion\nAligner ses trades avec le contexte global.\n"
-
-    # ==============================
-    # DISPLAY
-    # ==============================
-    st.subheader("Top 5")
-    st.dataframe(top5)
-
     st.subheader("Rapport")
     st.code(text)
 
     # ==============================
     # DISCORD
     # ==============================
-    if WEBHOOK_URL:
+    if WEBHOOK_URL and not top5.empty:
         requests.post(WEBHOOK_URL, json={"content": text})
