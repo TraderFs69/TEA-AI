@@ -4,6 +4,7 @@ import datetime
 import os
 import streamlit as st
 import plotly.graph_objects as go
+from concurrent.futures import ThreadPoolExecutor
 from polygon import RESTClient
 from openai import OpenAI
 
@@ -18,7 +19,18 @@ client = RESTClient(API_KEY)
 gpt = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 st.set_page_config(layout="wide")
-st.title("🟫 TEA — LEVEL 5 (STABLE)")
+st.title("🟫 TEA — FINAL SYSTEM")
+
+# ==============================
+# LOAD SP500
+# ==============================
+@st.cache_data
+def load_sp500():
+    url = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
+    df = pd.read_csv(url)
+    return df["Symbol"].tolist()
+
+tickers = load_sp500()
 
 # ==============================
 # DATA
@@ -52,12 +64,12 @@ def get_data(ticker):
         df.set_index("time", inplace=True)
         return df
 
-    except Exception as e:
+    except:
         return None
 
 
 # ==============================
-# INDICATORS (FIX)
+# INDICATORS
 # ==============================
 def compute_indicators(df):
 
@@ -76,11 +88,11 @@ def compute_indicators(df):
     df["Volume_MA"] = df["volume"].rolling(20).mean()
     df["RVOL"] = df["volume"] / df["Volume_MA"]
 
-    return df.dropna()  # 🔥 CRUCIAL
+    return df.dropna()
 
 
 # ==============================
-# SCAN (FIX)
+# ANALYZE
 # ==============================
 def analyze_ticker(ticker):
 
@@ -97,40 +109,53 @@ def analyze_ticker(ticker):
 
     score = 0
 
+    # Trend
     if latest["close"] > latest["EMA20"]:
         score += 1
 
+    # Momentum
     if 55 < latest["RSI"] < 70:
         score += 1
 
+    # Volume
     if latest["RVOL"] > 1.2:
         score += 1
 
-    # 🔥 BREAKOUT FIX
+    # Breakout
     high20 = df["high"].rolling(20).max().iloc[-1]
     if latest["close"] >= high20:
         score += 2
 
-    if score < 2:
+    if score < 3:
         return None
+
+    # 🔥 ENTRY / STOP / TP
+    entry = latest["close"]
+    stop = df["low"].rolling(10).min().iloc[-1]
+    target = entry + (entry - stop) * 2
 
     return {
         "ticker": ticker,
         "score": score,
         "rsi": round(latest["RSI"], 1),
-        "rvol": round(latest["RVOL"], 2)
+        "rvol": round(latest["RVOL"], 2),
+        "entry": round(entry, 2),
+        "stop": round(stop, 2),
+        "target": round(target, 2)
     }
 
 
 # ==============================
-# SCAN MARKET (SAFE)
+# SCAN (FAST)
 # ==============================
-def scan_market(tickers):
+def scan_market():
 
     results = []
 
-    for t in tickers:
-        r = analyze_ticker(t)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        data = executor.map(analyze_ticker, tickers)
+
+    for r in data:
         if r:
             results.append(r)
 
@@ -140,18 +165,6 @@ def scan_market(tickers):
     df = pd.DataFrame(results)
 
     return df.sort_values(by="score", ascending=False).head(5)
-
-
-# ==============================
-# PROBABILITY
-# ==============================
-def compute_probability(score):
-    if score >= 4:
-        return 0.65
-    elif score == 3:
-        return 0.60
-    else:
-        return 0.55
 
 
 # ==============================
@@ -166,7 +179,7 @@ def get_macro():
             model="gpt-4o-mini",
             messages=[{
                 "role": "user",
-                "content": "Analyse le marché en 3 lignes."
+                "content": "Analyse le marché global en 3 lignes style hedge fund."
             }],
             temperature=0.4
         )
@@ -215,37 +228,35 @@ def send_discord(msg):
 # ==============================
 # MAIN
 # ==============================
-tickers = ["AAPL","MSFT","NVDA","TSLA","META","AMD","AMZN","GOOGL","NFLX"]
-
-# MACRO
 st.subheader("🌍 Macro")
 macro = get_macro()
 st.write(macro)
 
-# SCAN
-st.subheader("🎯 Top 5")
-
-top5 = scan_market(tickers)
+st.subheader("🎯 Scan S&P500")
+top5 = scan_market()
 
 if top5.empty:
-    st.warning("⚠️ Aucun stock trouvé — conditions marché faibles")
+    st.warning("⚠️ Aucun setup aujourd’hui")
 else:
     st.dataframe(top5)
 
-    # CHARTS
     st.subheader("📊 Charts")
-
     for _, row in top5.iterrows():
         df_chart = get_data(row["ticker"])
         if df_chart is not None:
             plot_chart(df_chart.tail(100), row["ticker"])
 
     # REPORT
-    report = "🟫 TEA LEVEL 5\n\n"
+    report = "🟫 TEA FINAL REPORT\n\n"
     report += "Macro:\n" + macro + "\n\n"
 
     for _, row in top5.iterrows():
-        prob = compute_probability(row["score"])
-        report += f"{row['ticker']} — Score {row['score']} | Prob {int(prob*100)}%\n"
+        report += f"""{row['ticker']}
+Score: {row['score']}
+Entry: {row['entry']}
+Stop: {row['stop']}
+Target: {row['target']}
+
+"""
 
     send_discord(report)
