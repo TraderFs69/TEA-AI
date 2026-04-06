@@ -3,12 +3,15 @@ import numpy as np
 import requests
 import datetime
 from polygon import RESTClient
+import streamlit as st
 
 # ==============================
 # CONFIG
 # ==============================
-API_KEY = "TA_CLE_POLYGON"
-WEBHOOK_URL = "TON_WEBHOOK_DISCORD"
+
+
+API_KEY = st.secrets["POLYGON_API_KEY"]
+WEBHOOK_URL = st.secrets["DISCORD_WEBHOOK_URL"]
 
 client = RESTClient(API_KEY)
 
