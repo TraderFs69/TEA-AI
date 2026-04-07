@@ -88,7 +88,7 @@ def compute_indicators(df):
     return df.dropna()
 
 # ==============================
-# SPY + BREADTH
+# MARKET DATA
 # ==============================
 def get_spy():
     df = compute_indicators(get_data("SPY"))
@@ -174,7 +174,9 @@ def analyze_ticker(t):
         "score": score,
         "entry": round(latest["close"],2),
         "stop": round(df["low"].rolling(10).min().iloc[-1],2),
-        "target": round(latest["close"]*1.1,2)
+        "target": round(latest["close"]*1.1,2),
+        "rsi": round(latest["RSI"],1),
+        "rvol": round(latest["RVOL"],2)
     }
 
 def scan_market():
@@ -187,26 +189,40 @@ def scan_market():
     return pd.DataFrame(results).sort_values(by="score", ascending=False).head(5) if results else pd.DataFrame()
 
 # ==============================
-# GPT
+# GPT ANALYSIS
 # ==============================
+def generate_market_analysis(spy, breadth, score):
+    if gpt is None:
+        return "Analyse indisponible"
+    prompt = f"Analyse marché: RSI {spy['rsi']}, breadth {breadth}%, score {score}/10"
+    return gpt.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt}]
+    ).choices[0].message.content.strip()
+
+def generate_sector_analysis(df):
+    if gpt is None:
+        return "Analyse indisponible"
+    sectors = ", ".join(df.head(3)["sector"])
+    prompt = f"Analyse secteurs dominants: {sectors}"
+    return gpt.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt}]
+    ).choices[0].message.content.strip()
+
 def generate_stock_analysis(row):
     if gpt is None:
         return "Analyse indisponible"
-    try:
-        res = gpt.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":f"Analyse {row['ticker']} en 3 lignes."}],
-            temperature=0.5
-        )
-        return res.choices[0].message.content.strip()
-    except:
-        return "Erreur GPT"
+    prompt = f"Analyse {row['ticker']} RSI {row['rsi']} RVOL {row['rvol']}"
+    return gpt.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt}]
+    ).choices[0].message.content.strip()
 
 # ==============================
 # DISCORD FIX
 # ==============================
 def send_discord(report):
-
     if not WEBHOOK_URL:
         st.error("Webhook manquant")
         return
@@ -226,12 +242,21 @@ market_score = compute_market_score(spy, breadth)
 sector_df = analyze_sectors()
 top5 = scan_market()
 
+market_analysis = generate_market_analysis(spy, breadth, market_score)
+sector_analysis = generate_sector_analysis(sector_df)
+
 # UI
 st.subheader("📊 Market")
 st.write(f"RSI: {spy['rsi']} | Breadth: {breadth}% | Score: {market_score}/10")
 
+st.subheader("🌍 Analyse Marché")
+st.write(market_analysis)
+
 st.subheader("🏭 Secteurs")
 st.dataframe(sector_df)
+
+st.subheader("🧠 Analyse Secteurs")
+st.write(sector_analysis)
 
 st.subheader("🎯 Top 5")
 st.dataframe(top5)
@@ -243,29 +268,29 @@ report = f"""
 Score: {market_score}/10
 Breadth: {breadth}%
 
+🌍 Marché:
+{market_analysis}
+
 🏭 Secteurs:
+{sector_analysis}
+
+🎯 Picks:
+
 """
 
-for _, row in sector_df.head(3).iterrows():
-    report += f"{row['sector']} ({row['etf']}) Score {row['score']}\n"
-
-report += "\n🎯 Picks:\n\n"
-
 if top5.empty:
-    report += "Aucun setup aujourd’hui\n"
+    report += "Aucun setup\n"
 else:
     for _, row in top5.iterrows():
         analysis = generate_stock_analysis(row)
-
         report += f"""{row['ticker']}
-Score: {row['score']}
 Entry: {row['entry']}
 Stop: {row['stop']}
 Target: {row['target']}
 
 🧠 {analysis}
 
---------------
+-----
 """
 
 send_discord(report)
