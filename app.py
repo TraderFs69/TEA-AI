@@ -393,8 +393,31 @@ report = f"""
 Market Score: {market_score}/10
 Breadth: {breadth}%
 
-Macro:
+🌍 Macro:
 {macro}
+
+🏭 Secteurs dominants:
 """
 
-send_discord(report, top5)
+for _, row in sector_df.head(3).iterrows():
+    report += f"{row['sector']} ({row['etf']}) Score {row['score']}\n"
+
+report += "\n🎯 Top Picks:\n\n"
+
+for _, row in top5.iterrows():
+
+    # 🔥 ANALYSE GPT AJOUTÉE
+    analysis = generate_stock_analysis(row)
+
+    report += f"""{row['ticker']}
+Score: {row['score']}
+Entry: {row['entry']}
+Stop: {row['stop']}
+Target: {row['target']}
+
+🧠 Analyse:
+{analysis}
+
+------------------
+
+"""
