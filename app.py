@@ -3,7 +3,6 @@ import requests
 import datetime
 import os
 import streamlit as st
-import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor
 from polygon import RESTClient
 from openai import OpenAI
@@ -19,7 +18,7 @@ client = RESTClient(API_KEY)
 gpt = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 st.set_page_config(layout="wide")
-st.title("🟫 TEA — FINAL SYSTEM")
+st.title("🟫 TEA — DESK MODE")
 
 # ==============================
 # LOAD SP500
@@ -67,7 +66,7 @@ def get_data(ticker):
         return None
 
 # ==============================
-# INDICATORS
+# INDICATORS (INTERNAL ONLY)
 # ==============================
 def compute_indicators(df):
     df["EMA20"] = df["close"].ewm(span=20).mean()
@@ -88,7 +87,7 @@ def compute_indicators(df):
     return df.dropna()
 
 # ==============================
-# MARKET DATA
+# MARKET
 # ==============================
 def get_spy():
     df = compute_indicators(get_data("SPY"))
@@ -174,9 +173,7 @@ def analyze_ticker(t):
         "score": score,
         "entry": round(latest["close"],2),
         "stop": round(df["low"].rolling(10).min().iloc[-1],2),
-        "target": round(latest["close"]*1.1,2),
-        "rsi": round(latest["RSI"],1),
-        "rvol": round(latest["RVOL"],2)
+        "target": round(latest["close"]*1.1,2)
     }
 
 def scan_market():
@@ -189,49 +186,67 @@ def scan_market():
     return pd.DataFrame(results).sort_values(by="score", ascending=False).head(5) if results else pd.DataFrame()
 
 # ==============================
-# GPT ANALYSIS
+# GPT — DESK MODE MINIMAL
 # ==============================
-def generate_market_analysis(spy, breadth, score):
-    if gpt is None:
-        return "Analyse indisponible"
-    prompt = f"Analyse marché: RSI {spy['rsi']}, breadth {breadth}%, score {score}/10"
-    return gpt.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}]
-    ).choices[0].message.content.strip()
-
-def generate_sector_analysis(df):
-    if gpt is None:
-        return "Analyse indisponible"
-    sectors = ", ".join(df.head(3)["sector"])
-    prompt = f"Analyse secteurs dominants: {sectors}"
-    return gpt.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}]
-    ).choices[0].message.content.strip()
-
 def generate_stock_analysis(row):
+
     if gpt is None:
         return "Analyse indisponible"
-    prompt = f"Analyse {row['ticker']} RSI {row['rsi']} RVOL {row['rvol']}"
+
+    prompt = f"""
+Tu es un analyste hedge fund.
+
+Donne une thèse en 2 phrases max.
+
+- Pas d’indicateurs
+- Pas de jargon technique
+- Focus : pourquoi maintenant + scénario
+
+Ticker: {row['ticker']}
+"""
+
+    try:
+        res = gpt.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0.6
+        )
+        return res.choices[0].message.content.strip()
+    except:
+        return "Analyse indisponible"
+
+def generate_market_analysis(spy, breadth, score):
+
+    if gpt is None:
+        return "Analyse indisponible"
+
+    prompt = f"""
+Analyse marché en 3 lignes max.
+
+RSI: {spy['rsi']}
+Breadth: {breadth}
+Score: {score}/10
+
+Style hedge fund, concis.
+"""
+
     return gpt.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role":"user","content":prompt}]
     ).choices[0].message.content.strip()
 
 # ==============================
-# DISCORD FIX
+# DISCORD
 # ==============================
 def send_discord(report):
+
     if not WEBHOOK_URL:
-        st.error("Webhook manquant")
         return
 
     chunks = [report[i:i+1800] for i in range(0, len(report), 1800)]
 
     for chunk in chunks:
-        r = requests.post(WEBHOOK_URL, json={"content": chunk})
-        print("Discord:", r.status_code)
+        requests.post(WEBHOOK_URL, json={"content": chunk})
 
 # ==============================
 # MAIN
@@ -239,56 +254,40 @@ def send_discord(report):
 spy = get_spy()
 breadth = compute_breadth()
 market_score = compute_market_score(spy, breadth)
+
 sector_df = analyze_sectors()
 top5 = scan_market()
 
 market_analysis = generate_market_analysis(spy, breadth, market_score)
-sector_analysis = generate_sector_analysis(sector_df)
 
 # UI
-st.subheader("📊 Market")
-st.write(f"RSI: {spy['rsi']} | Breadth: {breadth}% | Score: {market_score}/10")
-
-st.subheader("🌍 Analyse Marché")
+st.subheader("Market")
 st.write(market_analysis)
 
-st.subheader("🏭 Secteurs")
-st.dataframe(sector_df)
-
-st.subheader("🧠 Analyse Secteurs")
-st.write(sector_analysis)
-
-st.subheader("🎯 Top 5")
+st.subheader("Top Picks")
 st.dataframe(top5)
 
 # REPORT
 report = f"""
-🟫 TEA REPORT
+🟫 TEA DESK
 
 Score: {market_score}/10
 Breadth: {breadth}%
 
-🌍 Marché:
 {market_analysis}
-
-🏭 Secteurs:
-{sector_analysis}
-
-🎯 Picks:
 
 """
 
 if top5.empty:
-    report += "Aucun setup\n"
+    report += "No setup today\n"
 else:
     for _, row in top5.iterrows():
         analysis = generate_stock_analysis(row)
-        report += f"""{row['ticker']}
-Entry: {row['entry']}
-Stop: {row['stop']}
-Target: {row['target']}
 
-🧠 {analysis}
+        report += f"""{row['ticker']}
+Entry: {row['entry']} | Stop: {row['stop']}
+
+{analysis}
 
 -----
 """
