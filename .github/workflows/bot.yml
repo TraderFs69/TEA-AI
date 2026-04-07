@@ -1,0 +1,30 @@
+name: TEA BOT
+
+on:
+  schedule:
+    - cron: "15 1 * * 2-6"  # 20h15 Québec (UTC = +5h, jour décalé)
+  workflow_dispatch:  # permet de lancer manuellement
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python bot.py
