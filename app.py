@@ -323,10 +323,33 @@ def plot_chart(df, ticker):
 def send_discord(report, top5):
 
     if not WEBHOOK_URL:
+        st.error("❌ Discord webhook manquant")
         return
 
-    requests.post(WEBHOOK_URL, json={"content": report})
+    def send(msg):
+        r = requests.post(WEBHOOK_URL, json={"content": msg})
+        st.write("Discord status:", r.status_code)
 
+    # 🔥 Split message (max 2000 chars)
+    chunks = [report[i:i+1800] for i in range(0, len(report), 1800)]
+
+    for chunk in chunks:
+        send(chunk)
+
+    # 🔥 Envoi des picks séparément (plus lisible)
+    if top5 is not None and not top5.empty:
+
+        send("📊 TOP PICKS")
+
+        for _, row in top5.iterrows():
+            msg = f"""
+{row['ticker']}
+Score: {row['score']}
+Entry: {row['entry']}
+Stop: {row['stop']}
+Target: {row['target']}
+"""
+            send(msg)
 # ==============================
 # MAIN
 # ==============================
