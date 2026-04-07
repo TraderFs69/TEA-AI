@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 from concurrent.futures import ThreadPoolExecutor
 from polygon import RESTClient
 from openai import OpenAI
-import tempfile
 
 # ==============================
 # CONFIG
@@ -20,7 +19,7 @@ client = RESTClient(API_KEY)
 gpt = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 st.set_page_config(layout="wide")
-st.title("🟫 TEA — FINAL INSTITUTIONAL SYSTEM")
+st.title("🟫 TEA — FINAL SYSTEM")
 
 # ==============================
 # LOAD SP500
@@ -28,8 +27,7 @@ st.title("🟫 TEA — FINAL INSTITUTIONAL SYSTEM")
 @st.cache_data
 def load_sp500():
     url = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
-    df = pd.read_csv(url)
-    return df["Symbol"].tolist()
+    return pd.read_csv(url)["Symbol"].tolist()
 
 tickers = load_sp500()
 
@@ -72,7 +70,6 @@ def get_data(ticker):
 # INDICATORS
 # ==============================
 def compute_indicators(df):
-
     df["EMA20"] = df["close"].ewm(span=20).mean()
 
     delta = df["close"].diff()
@@ -91,59 +88,34 @@ def compute_indicators(df):
     return df.dropna()
 
 # ==============================
-# SPY
+# SPY + BREADTH
 # ==============================
 def get_spy():
-    df = get_data("SPY")
-    df = compute_indicators(df)
+    df = compute_indicators(get_data("SPY"))
     latest = df.iloc[-1]
-
     return {
-        "price": round(latest["close"], 2),
         "rsi": round(latest["RSI"], 1),
         "trend": latest["close"] > latest["EMA20"]
     }
 
-# ==============================
-# BREADTH
-# ==============================
 def compute_breadth():
-
-    count = 0
-    total = 0
-
-    sample = tickers[:200]
-
-    for t in sample:
+    count, total = 0, 0
+    for t in tickers[:150]:
         df = get_data(t)
         if df is None:
             continue
-
         df = compute_indicators(df)
         latest = df.iloc[-1]
-
         total += 1
         if latest["close"] > latest["EMA20"]:
             count += 1
-
     return round((count / total) * 100, 1) if total else 0
 
-# ==============================
-# MARKET SCORE
-# ==============================
 def compute_market_score(spy, breadth):
-
     score = 0
-
-    if spy["trend"]:
-        score += 4
-
-    if spy["rsi"] > 55:
-        score += 3
-
-    if breadth > 60:
-        score += 3
-
+    if spy["trend"]: score += 4
+    if spy["rsi"] > 55: score += 3
+    if breadth > 60: score += 3
     return score
 
 # ==============================
@@ -153,46 +125,29 @@ sector_map = {
     "Tech": "XLK",
     "Energy": "XLE",
     "Finance": "XLF",
-    "Healthcare": "XLV",
-    "Consumer": "XLY",
-    "Industrial": "XLI"
+    "Healthcare": "XLV"
 }
 
 def analyze_sectors():
-
     rows = []
-
     for name, ticker in sector_map.items():
         df = get_data(ticker)
         if df is None:
             continue
-
         df = compute_indicators(df)
         latest = df.iloc[-1]
-
         score = 0
-
-        if latest["close"] > latest["EMA20"]:
-            score += 1
-        if latest["RSI"] > 55:
-            score += 1
-        if latest["RVOL"] > 1.2:
-            score += 1
-
-        rows.append({
-            "sector": name,
-            "etf": ticker,
-            "score": score
-        })
-
+        if latest["close"] > latest["EMA20"]: score += 1
+        if latest["RSI"] > 55: score += 1
+        if latest["RVOL"] > 1.2: score += 1
+        rows.append({"sector": name, "etf": ticker, "score": score})
     return pd.DataFrame(rows).sort_values(by="score", ascending=False)
 
 # ==============================
 # SCAN
 # ==============================
-def analyze_ticker(ticker):
-
-    df = get_data(ticker)
+def analyze_ticker(t):
+    df = get_data(t)
     if df is None:
         return None
 
@@ -201,15 +156,11 @@ def analyze_ticker(ticker):
         return None
 
     latest = df.iloc[-1]
-
     score = 0
 
-    if latest["close"] > latest["EMA20"]:
-        score += 1
-    if 55 < latest["RSI"] < 70:
-        score += 1
-    if latest["RVOL"] > 1.2:
-        score += 1
+    if latest["close"] > latest["EMA20"]: score += 1
+    if 55 < latest["RSI"] < 70: score += 1
+    if latest["RVOL"] > 1.2: score += 1
 
     high20 = df["high"].rolling(20).max().iloc[-1]
     if latest["close"] >= high20:
@@ -218,156 +169,66 @@ def analyze_ticker(ticker):
     if score < 3:
         return None
 
-    entry = latest["close"]
-    stop = df["low"].rolling(10).min().iloc[-1]
-    target = entry + (entry - stop) * 2
-
     return {
-        "ticker": ticker,
+        "ticker": t,
         "score": score,
-        "rsi": round(latest["RSI"],1),
-        "rvol": round(latest["RVOL"],2),
-        "entry": round(entry,2),
-        "stop": round(stop,2),
-        "target": round(target,2)
+        "entry": round(latest["close"],2),
+        "stop": round(df["low"].rolling(10).min().iloc[-1],2),
+        "target": round(latest["close"]*1.1,2)
     }
 
 def scan_market():
-
     results = []
-
     with ThreadPoolExecutor(max_workers=10) as executor:
         data = executor.map(analyze_ticker, tickers)
-
     for r in data:
         if r:
             results.append(r)
-
-    if len(results) == 0:
-        return pd.DataFrame()
-
-    return pd.DataFrame(results).sort_values(by="score", ascending=False).head(5)
+    return pd.DataFrame(results).sort_values(by="score", ascending=False).head(5) if results else pd.DataFrame()
 
 # ==============================
-# GPT ANALYSES
+# GPT
 # ==============================
-def generate_macro_sector(spy, breadth, sectors):
-
-    if gpt is None:
-        return "Analyse indisponible"
-
-    top_sec = ", ".join(sectors.head(3)["sector"])
-
-    prompt = f"""
-Analyse le marché comme un analyste Goldman Sachs.
-
-SPY RSI: {spy['rsi']}
-Breadth: {breadth}%
-Secteurs dominants: {top_sec}
-
-4 lignes max.
-"""
-
-    res = gpt.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.5
-    )
-
-    return res.choices[0].message.content.strip()
-
-
 def generate_stock_analysis(row):
-
     if gpt is None:
         return "Analyse indisponible"
-
-    prompt = f"""
-Analyse ce stock comme un analyste senior Goldman Sachs.
-
-Ticker: {row['ticker']}
-RSI: {row['rsi']}
-RVOL: {row['rvol']}
-
-3 lignes max.
-"""
-
-    res = gpt.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.5
-    )
-
-    return res.choices[0].message.content.strip()
+    try:
+        res = gpt.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":f"Analyse {row['ticker']} en 3 lignes."}],
+            temperature=0.5
+        )
+        return res.choices[0].message.content.strip()
+    except:
+        return "Erreur GPT"
 
 # ==============================
-# CHART
+# DISCORD FIX
 # ==============================
-def plot_chart(df, ticker):
-
-    fig = go.Figure(data=[go.Candlestick(
-        x=df.index,
-        open=df["open"],
-        high=df["high"],
-        low=df["low"],
-        close=df["close"]
-    )])
-
-    fig.update_layout(template="plotly_dark", height=400)
-
-    st.plotly_chart(fig, use_container_width=True)
-
-# ==============================
-# DISCORD
-# ==============================
-def send_discord(report, top5):
+def send_discord(report):
 
     if not WEBHOOK_URL:
-        st.error("❌ Discord webhook manquant")
+        st.error("Webhook manquant")
         return
 
-    def send(msg):
-        r = requests.post(WEBHOOK_URL, json={"content": msg})
-        st.write("Discord status:", r.status_code)
-
-    # 🔥 Split message (max 2000 chars)
     chunks = [report[i:i+1800] for i in range(0, len(report), 1800)]
 
     for chunk in chunks:
-        send(chunk)
+        r = requests.post(WEBHOOK_URL, json={"content": chunk})
+        print("Discord:", r.status_code)
 
-    # 🔥 Envoi des picks séparément (plus lisible)
-    if top5 is not None and not top5.empty:
-
-        send("📊 TOP PICKS")
-
-        for _, row in top5.iterrows():
-            msg = f"""
-{row['ticker']}
-Score: {row['score']}
-Entry: {row['entry']}
-Stop: {row['stop']}
-Target: {row['target']}
-"""
-            send(msg)
 # ==============================
 # MAIN
 # ==============================
 spy = get_spy()
 breadth = compute_breadth()
 market_score = compute_market_score(spy, breadth)
-
 sector_df = analyze_sectors()
 top5 = scan_market()
 
-macro = generate_macro_sector(spy, breadth, sector_df)
-
 # UI
-st.subheader("📊 Market Internals")
+st.subheader("📊 Market")
 st.write(f"RSI: {spy['rsi']} | Breadth: {breadth}% | Score: {market_score}/10")
-
-st.subheader("🌍 Macro & Secteurs")
-st.write(macro)
 
 st.subheader("🏭 Secteurs")
 st.dataframe(sector_df)
@@ -375,49 +236,36 @@ st.dataframe(sector_df)
 st.subheader("🎯 Top 5")
 st.dataframe(top5)
 
-st.subheader("📊 Charts")
-for _, row in top5.iterrows():
-    df_chart = get_data(row["ticker"])
-    if df_chart is not None:
-        plot_chart(df_chart.tail(100), row["ticker"])
-
-st.subheader("🧠 Analyse institutionnelle")
-for _, row in top5.iterrows():
-    st.write(f"### {row['ticker']}")
-    st.write(generate_stock_analysis(row))
-
 # REPORT
 report = f"""
 🟫 TEA REPORT
 
-Market Score: {market_score}/10
+Score: {market_score}/10
 Breadth: {breadth}%
 
-🌍 Macro:
-{macro}
-
-🏭 Secteurs dominants:
+🏭 Secteurs:
 """
 
 for _, row in sector_df.head(3).iterrows():
     report += f"{row['sector']} ({row['etf']}) Score {row['score']}\n"
 
-report += "\n🎯 Top Picks:\n\n"
+report += "\n🎯 Picks:\n\n"
 
-for _, row in top5.iterrows():
+if top5.empty:
+    report += "Aucun setup aujourd’hui\n"
+else:
+    for _, row in top5.iterrows():
+        analysis = generate_stock_analysis(row)
 
-    # 🔥 ANALYSE GPT AJOUTÉE
-    analysis = generate_stock_analysis(row)
-
-    report += f"""{row['ticker']}
+        report += f"""{row['ticker']}
 Score: {row['score']}
 Entry: {row['entry']}
 Stop: {row['stop']}
 Target: {row['target']}
 
-🧠 Analyse:
-{analysis}
+🧠 {analysis}
 
-------------------
-
+--------------
 """
+
+send_discord(report)
